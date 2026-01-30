@@ -1,0 +1,479 @@
+{
+  "nodes": [
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        2112,
+        -512
+      ],
+      "id": "cd1f6fb2-a7f4-4186-90d4-90e15e0e91ed",
+      "name": "When clicking ‘Execute workflow’"
+    },
+    {
+      "parameters": {
+        "values": {
+          "string": [
+            {
+              "name": "countries",
+              "value": "UK, CH"
+            },
+            {
+              "name": "technologies",
+              "value": "Computer science"
+            },
+            {
+              "name": "criteria",
+              "value": "safe cycling, good public transport, low crime"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "bfc5d57d-d208-408f-baef-80d8b593398e",
+      "name": "1. User Input",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 1,
+      "position": [
+        2336,
+        -512
+      ]
+    },
+    {
+      "parameters": {
+        "endpointUrl": "http://mcp-server:3000/mcp",
+        "tool": {
+          "__rl": true,
+          "value": "get_criteria_list",
+          "mode": "list",
+          "cachedResultName": "get_criteria_list"
+        },
+        "parameters": {
+          "mappingMode": "defineBelow",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.mcpClient",
+      "typeVersion": 1,
+      "position": [
+        2560,
+        -512
+      ],
+      "id": "738d0b1b-27c2-4dab-b5f6-09649203a471",
+      "name": "2. MCP: Get possible criteria"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Access the nested array inside the input structure\nconst criteriaList = $json.content[0].text;\n\n// Map the internal objects to the \"CODE: Name\" format\nconst formattedList = criteriaList.map(c => `${c.code}: ${c.name}`).join('\\n');\n\nreturn {\n  formatted_criteria: formattedList,\n  user_criteria: $node[\"1. User Input\"].json.criteria\n};"
+      },
+      "id": "7888be3e-dcf9-4d95-81dd-5fb3e1b5dab1",
+      "name": "3. Format for LLM",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [
+        2784,
+        -496
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.mistral.ai/v1/chat/completions",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "mistralCloudApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{\nJSON.stringify({\n  \"model\": \"mistral-small-latest\",\n  \"messages\": [\n    {\n      \"role\": \"system\",\n      \"content\": \"You are an expert criteria matching AI. Match user criteria to available quality-of-life criteria codes.\\n\\n**Rules:**\\n1. Only use codes from the available list\\n2. Weight 1.0=perfect, 0.7=good, 0.4=partial, 0.0=no match\\n3. Return ONLY valid JSON object\\n4. Empty {} if no matches\\n\\n**Output format:** {\\\"CODE1\\\": 0.9, \\\"CODE2\\\": 0.7}\"\n    },\n    {\n      \"role\": \"user\",\n      \"content\": `User criteria: ${$json.user_criteria}\\n\\nAvailable criteria:\\n${$json.formatted_criteria}`\n    }\n  ],\n  \"temperature\": 0.3\n})\n}}",
+        "options": {}
+      },
+      "id": "581acd09-2058-47cb-9e5c-aeb0eecf294e",
+      "name": "3. Mistral: Match Criteria",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [
+        3008,
+        -512
+      ],
+      "credentials": {
+        "mistralCloudApi": {
+          "id": "njBGjWatSPgcAAXj",
+          "name": "Mistral Cloud account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// 1. Get the content string from the Mistral response\nconst content = $json.choices[0].message.content;\n\n// 2. Remove Markdown code blocks and trim\nconst jsonString = content.replace(/```json|```/g, \"\").trim();\n\ntry {\n  // 3. Parse the weights from the LLM\n  const weights = JSON.parse(jsonString);\n\n  // 4. Get countries from the \"User Input\" node\n  // We split the string by comma and trim whitespace to get an array\n  const countryInput = $node[\"1. User Input\"].json.countries;\n  const countriesArray = countryInput.split(',').map(c => c.trim());\n\n  // 5. Return an array of items (one for each country)\n  // This allows the following MCP node to run once per country automatically\n  return countriesArray.map(country => {\n    return {\n      json: {\n        weights: weights,\n        country: country\n      }\n    };\n  });\n\n} catch (error) {\n  // Handle cases where the LLM output might be invalid JSON\n  return [{\n    json: {\n      error: \"Failed to parse LLM output\",\n      rawContent: content\n    }\n  }];\n}"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3232,
+        -512
+      ],
+      "id": "914837ff-5e87-469a-873a-26a38c9d724b",
+      "name": "4. Format for MCP"
+    },
+    {
+      "parameters": {
+        "endpointUrl": "http://mcp-server:3000/mcp",
+        "tool": {
+          "__rl": true,
+          "value": "rank_towns_by_country",
+          "mode": "list",
+          "cachedResultName": "rank_towns_by_country"
+        },
+        "inputMode": "json",
+        "jsonInput": "={{\n{\n  \"weights\": $json.weights,\n  \"country\": $json.country,\n  \"limit\": 2\n}\n}}",
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.mcpClient",
+      "typeVersion": 1,
+      "position": [
+        3456,
+        -512
+      ],
+      "id": "572600af-16d7-4a0b-997c-01b67ffab93a",
+      "name": "4. MCP: Rank towns"
+    },
+    {
+      "parameters": {
+        "jsCode": "// This will store all individual city items we extract\nconst results = [];\n\n// Loop through each input item (e.g., one for France, one for Netherlands)\nfor (const item of $input.all()) {\n  \n  // Navigate the nested structure from your MCP tool output\n  const cities = item.json.content[0].text;\n  \n  for (const city of cities) {\n    // Regex logic:\n    // \\s* matches optional leading space\n    // \\( matches the opening parenthesis\n    // .*? matches everything inside (non-greedy)\n    // \\) matches the closing parenthesis\n    const cleanName = city.city_name.replace(/\\s*\\(.*?\\)/g, \"\").trim();\n\n    results.push({\n      json: {\n        city_code: city.city_code,\n        city_name: cleanName,\n        original_name: city.city_name, // Kept for reference\n        country: city.country,\n        score: city.score,\n        technologies: $node[\"1. User Input\"].json.technologies\n      }\n    });\n  }\n}\n\nreturn results;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3680,
+        -512
+      ],
+      "id": "a76c8a65-2870-4c44-82cd-665b6d04079a",
+      "name": "5. Format towns"
+    },
+    {
+      "parameters": {
+        "endpointUrl": "http://mcp-server:3000/mcp",
+        "tool": {
+          "__rl": true,
+          "value": "search_offers",
+          "mode": "list",
+          "cachedResultName": "search_offers"
+        },
+        "inputMode": "json",
+        "jsonInput": "={{\n{\n  \"city\": $json.city_name + \" (\" + $json.country + \")\",\n  \"technology\": $json.technologies,\n  \"max_results\": 5\n}\n}}",
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.mcpClient",
+      "typeVersion": 1,
+      "position": [
+        3904,
+        -512
+      ],
+      "id": "3c6d4fe6-9024-4a77-82d1-e0a16d8ed47b",
+      "name": "5.MCP: Search offers"
+    },
+    {
+      "parameters": {
+        "jsCode": "const results = [];\n\nfor (const item of $input.all()) {\n\n  const offers = item.json.content[0].text;\n\n  const combinedText = offers\n                    .map((o, index) => \n                        `OFFER ${index + 1}:\\nTitle: ${o.title}\\nCity: ${o.city}\\nContent: ${o.content}\\nURL: ${o.url}`\n                    ).join('\\n\\n---\\n\\n');\n                \n                \n  results.push({\n      json: {\n          city: offers[0].city,\n          offers_count: offers.length,\n          offers_text: combinedText\n      }\n  });\n}\n\nreturn results;\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4128,
+        -512
+      ],
+      "id": "876f0583-a09d-42cb-9e86-3d133ed15df7",
+      "name": "6. Format for LLM"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.mistral.ai/v1/chat/completions",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "mistralCloudApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{\n{\n  \"model\": \"mistral-small-latest\",\n  \"messages\": [\n    {\n      \"role\": \"system\",\n      \"content\": \"You are a professional recruitment AI. Your task is to extract internship details from raw web search results. Return a JSON object with an array 'offers' containing: 'company', 'position', 'skills', 'summary', 'location', 'url'.\"\n    },\n    {\n      \"role\": \"user\",\n      \"content\": \"Extract internships for \" + $json.city + \" from this data:\\n\\n\" + $json.offers_text\n    }\n  ],\n  \"response_format\": { \"type\": \"json_object\" }\n}\n}}",
+        "options": {}
+      },
+      "id": "6d6caff7-9206-4956-900c-da32cbf3c7c1",
+      "name": "6. Mistral: Extract info",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [
+        4352,
+        -512
+      ],
+      "credentials": {
+        "mistralCloudApi": {
+          "id": "njBGjWatSPgcAAXj",
+          "name": "Mistral Cloud account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const allOffers = [];\n\n// 1. Loop through ALL input items (all towns processed by Mistral)\nfor (const item of $input.all()) {\n  try {\n    // 2. Extract and parse the content from each specific item\n    const rawContent = item.json.choices[0].message.content;\n    const data = JSON.parse(rawContent);\n    \n    // 3. Extract the offers array from this specific town\n    if (data.offers && Array.isArray(data.offers)) {\n      for (const offer of data.offers) {\n        allOffers.push({\n          json: {\n            Company: offer.company,\n            Position: offer.position,\n            // Convert skills array to a string so it fits in a single CSV cell\n            Skills: Array.isArray(offer.skills) ? offer.skills.join(', ') : offer.skills,\n            Summary: offer.summary,\n            Location: offer.location,\n            URL: offer.url\n          }\n        });\n      }\n    }\n  } catch (error) {\n    // We log the error but keep going to ensure we don't lose other towns\n    console.error(\"Failed to parse a town response:\", error);\n  }\n}\n\n// 4. Return the complete list of all internships from all towns\nreturn allOffers;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4576,
+        -512
+      ],
+      "id": "78156959-854e-49fe-80a2-5cb8b8ba0626",
+      "name": "7. Format for summary"
+    },
+    {
+      "parameters": {
+        "operation": "toFile",
+        "options": {}
+      },
+      "id": "20e2eea0-3982-44f7-89e0-23a76c039508",
+      "name": "7. Export to CSV",
+      "type": "n8n-nodes-base.spreadsheetFile",
+      "typeVersion": 1,
+      "position": [
+        4800,
+        -608
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\nif (items.length === 0) return { content: \"❌ No internships found.\" };\n\n// 1. Group offers by Location\nconst grouped = {};\nitems.forEach(item => {\n    const loc = item.json.Location || \"Other\";\n    if (!grouped[loc]) grouped[loc] = [];\n    grouped[loc].push(item.json);\n});\n\n// 2. Pick a mix of offers (Round-Robin style)\nconst mixedTop10 = [];\nconst locations = Object.keys(grouped);\nlet cityIndex = 0;\n\nwhile (mixedTop10.length < 10 && mixedTop10.length < items.length) {\n    const currentCity = locations[cityIndex % locations.length];\n    const offer = grouped[currentCity].shift(); // Take the top offer from this city\n    \n    if (offer) {\n        mixedTop10.push(offer);\n    }\n    cityIndex++;\n}\n\n// 3. Build the Discord Message\nlet discordMessage = `🚀 **Internship Scout: Diverse Top 10 Picks**\\n`;\ndiscordMessage += `Previewing matches across **${locations.length}** different locations:\\n\\n`;\n\nmixedTop10.forEach((offer, index) => {\n    const line = `**${index + 1}. ${offer.Company}** (${offer.Location})\\n🔹 *${offer.Position}*\\n🔗 [View Offer](${offer.URL})\\n\\n`;\n    \n    if ((discordMessage.length + line.length) < 1900) {\n        discordMessage += line;\n    }\n});\n\ndiscordMessage += `📑 **Full report with all ${items.length} matches attached.**`;\n\nreturn { content: discordMessage };"
+      },
+      "id": "5272ed42-0502-4329-9e6f-b61938553761",
+      "name": "7. Generate discord message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [
+        4800,
+        -416
+      ]
+    },
+    {
+      "parameters": {
+        "authentication": "webhook",
+        "content": "={{ $json.content}}",
+        "options": {},
+        "files": {
+          "values": [
+            {}
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.discord",
+      "typeVersion": 2,
+      "position": [
+        5248,
+        -512
+      ],
+      "id": "6f3ba64f-7c02-4abd-aac2-f0a8177683dd",
+      "name": "8. Send discord message",
+      "webhookId": "c5691b3b-abe8-46de-8b75-2e4d08941b3b",
+      "credentials": {
+        "discordWebhookApi": {
+          "id": "BVS8adImN9U6IIk7",
+          "name": "Discord Webhook account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineByPosition",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        5024,
+        -512
+      ],
+      "id": "e45c6176-851c-4ef9-9186-722d8f7fa6fe",
+      "name": "Merge"
+    }
+  ],
+  "connections": {
+    "When clicking ‘Execute workflow’": {
+      "main": [
+        [
+          {
+            "node": "1. User Input",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "1. User Input": {
+      "main": [
+        [
+          {
+            "node": "2. MCP: Get possible criteria",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "2. MCP: Get possible criteria": {
+      "main": [
+        [
+          {
+            "node": "3. Format for LLM",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "3. Format for LLM": {
+      "main": [
+        [
+          {
+            "node": "3. Mistral: Match Criteria",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "3. Mistral: Match Criteria": {
+      "main": [
+        [
+          {
+            "node": "4. Format for MCP",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "4. Format for MCP": {
+      "main": [
+        [
+          {
+            "node": "4. MCP: Rank towns",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "4. MCP: Rank towns": {
+      "main": [
+        [
+          {
+            "node": "5. Format towns",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "5. Format towns": {
+      "main": [
+        [
+          {
+            "node": "5.MCP: Search offers",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "5.MCP: Search offers": {
+      "main": [
+        [
+          {
+            "node": "6. Format for LLM",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "6. Format for LLM": {
+      "main": [
+        [
+          {
+            "node": "6. Mistral: Extract info",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "6. Mistral: Extract info": {
+      "main": [
+        [
+          {
+            "node": "7. Format for summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "7. Format for summary": {
+      "main": [
+        [
+          {
+            "node": "7. Export to CSV",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "7. Generate discord message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "7. Export to CSV": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "7. Generate discord message": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Merge": {
+      "main": [
+        [
+          {
+            "node": "8. Send discord message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "c071ee03f6b7ce12b652624e298413f77b0a87689983db602e6972f1310dd61c"
+  }
+}
